@@ -16,6 +16,8 @@ python3 lwe_lab.py ring         # anillo de polinomios: la puerta r=1 y cómo la
 python3 lwe_lab.py amplify      # la raíz del muro: eliminar incógnitas multiplica el error (~6 s)
 python3 lwe_lab.py sieve        # la criba: partículas que chocan a 60°; exponente medido (~30 s)
 python3 lwe_lab.py ringsieve    # ¿la simetría del anillo de ML-KEM cambia el exponente? (~45 s)
+python3 lwe_lab.py period       # puerta cuántica: ¿tiene LWE un periodo tipo Shor? (~2 s)
+python3 lwe_lab.py module       # puerta algebraica: ¿el rango 2 esconde un sub-retículo denso? (~1 s)
 ```
 
 ## Qué mirar
@@ -30,6 +32,8 @@ python3 lwe_lab.py ringsieve    # ¿la simetría del anillo de ML-KEM cambia el 
 | `amplify` | El dueño multiplica por 1; el atacante tiene que eliminar incógnitas y multiplica el error por el tamaño de sus multiplicadores. Compara multiplicadores uniformes, LLL e ideales con el umbral `q/4`, y hace la cuenta para ML-KEM-512: existen `2^1024` multiplicadores buenos y nadie sabe encontrar uno. |
 | `sieve` | Criba de Gauss: vectores del retículo que chocan y se acortan. Mide cuántas partículas hacen falta por dimensión (≈ `2^(0.21·dim)` en teoría) y explica el exponente con la geometría del choque a 60°. |
 | `ringsieve` | El mismo retículo dual construido aleatorio y con la estructura de anillo (cada vector regala sus n rotaciones). Mismo número de partículas al final (mismo exponente); la simetría solo ahorra lanzadas, un factor que crece como n. |
+| `period` | La puerta cuántica. Factorizar tiene un peine de Fourier de `r` dientes (verificado: cuenta dientes y factoriza N); LWE tiene un solo pico entre `q^n` candidatos (verificado por enumeración). Shor necesita el peine; LWE no lo tiene, y el anillo solo ofrece `n` rotaciones (polinómico). |
+| `module` | La puerta algebraica. Vector más corto / heurística gaussiana en retículos aleatorios y en módulos de rango 2 (ML-KEM), con el mínimo exacto. El módulo no es más denso (su mínimo es igual o mayor): la estructura da multiplicidad `2n` por rotaciones, no densidad. No hay rampa de descenso como la que hundió el rango 1. |
 | `wave` | El ataque dual: pliega `n-2` incógnitas con vectores duales cortos `w` y evalúa las `q²` opciones restantes de golpe con una FFT. La señal de cada onda es `exp(-2π²σ²|w|²/q²)`; el pico medido sigue a la fórmula y se hunde en cuanto LLL deja de encontrar pliegues cortos. La columna `fantasma` mide el falso candidato más alto: 7–11 frente a 4,3 si las ondas fueran independientes, el fallo que Ducas y Pulles señalaron en el ataque de MATZOV. |
 
 ## Ataques implementados

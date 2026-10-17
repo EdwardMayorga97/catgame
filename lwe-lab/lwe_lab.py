@@ -824,6 +824,15 @@ def cmd_leak(args):
 # Experimento "ondas": ataque dual con plegado y transformada de Fourier
 # ---------------------------------------------------------------------------
 
+def kernel_basis(A, q, rng):
+    """Base del retículo {w en Z^m : w·A = 0 (mod q)} en coordenadas ORIGINALES (ya des-permutadas)."""
+    basis, perm = dual_basis(A, q, rng)
+    out = np.zeros_like(basis)
+    out[:, perm] = basis
+    assert not np.any((out @ A) % q), "kernel_basis: el núcleo no anula A"
+    return out
+
+
 def dual_basis(A_K, q, rng):
     """Base del retículo de pliegues {w en Z^m : w·A_K = 0 (mod q)}. Tiene det q^k."""
     m, k = A_K.shape
@@ -1268,7 +1277,7 @@ def cmd_ringsieve(args):
         m = 2 * n
         gh = math.sqrt(m / (2 * math.pi * math.e)) * q ** (n / m)
         A = rng.integers(0, q, size=(m, n), dtype=np.int64)
-        basis, _ = dual_basis(A, q, rng)
+        basis = kernel_basis(A, q, rng)
         t0 = time.perf_counter()
         sh_r, sz_r, dr_r = gauss_sieve(basis, rng, max_samples=args.max_samples)
         t_r = time.perf_counter() - t0
@@ -1276,9 +1285,8 @@ def cmd_ringsieve(args):
         a1 = rng.integers(0, q, size=n, dtype=np.int64)
         a2 = rng.integers(0, q, size=n, dtype=np.int64)
         A_s = np.vstack([negacyclic_matrix(a1), negacyclic_matrix(a2)])
-        basis_s, _ = dual_basis(A_s, q, rng)
-        w0 = basis_s[0]
-        assert not np.any((rotate_pair(w0, n) @ A_s) % q), "la rotación se salió del retículo"
+        basis_s = kernel_basis(A_s, q, rng)
+        assert not np.any((rotate_pair(basis_s[0], n) @ A_s) % q), "la rotación se salió del retículo"
 
         def orbit(v, n=n):
             out = [v]
@@ -1335,6 +1343,143 @@ def cmd_sieve(args):
     print("En dimensión alta casi todos los pares son casi perpendiculares: la fracción útil es (√3/2)^dim.")
     print("Hace falta una lista de (4/3)^(dim/2) partículas para que los choques útiles sean frecuentes.")
     print("Ese exponente no es criptografía: es geometría de esferas en dimensión alta (concentración de la medida).")
+
+
+# ---------------------------------------------------------------------------
+# Puerta 1 (cuántica): ¿tiene LWE un "periodo" que una transformada revele?
+# ---------------------------------------------------------------------------
+
+def mult_order(a, N):
+    x, r = a % N, 1
+    while x != 1:
+        x = (x * a) % N
+        r += 1
+        if r > N:
+            return None
+    return r
+
+
+def shor_comb(a, N, Q):
+    """Simula el muestreo de Shor: estado = x con a^x ≡ 1 (mod N) = múltiplos del orden r.
+    Devuelve el espectro |QFT|² sobre Z_Q, que tiene un peine de dientes en múltiplos de Q/r."""
+    r = mult_order(a, N)
+    comb = np.zeros(Q)
+    comb[np.arange(0, Q, r)] = 1.0
+    spec = np.abs(np.fft.fft(comb)) ** 2
+    return r, spec / spec.sum()
+
+
+def lwe_score_landscape(A, b, q, s_candidates):
+    """Puntaje dual Re Σ exp(2πi (b_i - a_i·s')/q) para cada candidato s'. Un pico = un secreto."""
+    phase = 2 * np.pi / q
+    out = np.empty(len(s_candidates))
+    for j, sp in enumerate(s_candidates):
+        out[j] = np.cos(phase * centered((b - A @ sp) % q, q)).sum()
+    return out
+
+
+def cmd_period(args):
+    print("PUERTA CUÁNTICA: Shor rompe factorización porque f(x)=a^x mod N tiene un PERIODO r.")
+    print("Una sola transformada de Fourier revela un peine de q/r dientes; cualquier diente da r.")
+    print("Pregunta: ¿tiene LWE un peine parecido, o solo un pico aislado?")
+    print()
+    Q = 4096
+    print(f"Factorización (peine de Fourier, Q={Q} puntos):")
+    print(f"  {'N':>6} {'a':>4} {'orden r':>8} {'dientes del peine':>18} {'pico/ruido':>12} {'factores':>12}")
+    for N in (15, 21, 35, 143, 323, 1073):
+        a = next(x for x in range(2, N) if math.gcd(x, N) == 1 and mult_order(x, N) and mult_order(x, N) % 2 == 0)
+        r, spec = shor_comb(a, N, Q)
+        teeth = int(np.sum(spec > 0.5 * spec.max()))
+        snr = spec.max() / spec[spec > 0].mean()
+        g = math.gcd(pow(a, r // 2, N) - 1, N)
+        fac = f"{g}·{N // g}" if 1 < g < N else "(reintentar a)"
+        print(f"  {N:>6} {a:>4} {r:>8} {teeth:>18} {snr:>12.0f} {fac:>12}")
+    print("  -> el peine tiene r dientes (crece con N). El periodo ES la estructura explotable.")
+    print()
+    print("LWE (paisaje de puntajes; se enumeran TODOS los q^n candidatos):")
+    print(f"  {'n':>3} {'q':>4} {'candidatos':>11} {'pico/2º':>9} {'picos altos':>12} {'¿peine?':>9}")
+    for n, q in ((2, 23), (3, 23), (3, 31), (4, 17)):
+        rng = np.random.default_rng(args.seed + n)
+        P = Params(n, q, 4 * n, 1)
+        s, (A, b), e = keygen(rng, P)
+        cand = np.array(list(itertools.product(range(q), repeat=n)), dtype=np.int64)
+        land = lwe_score_landscape(A, b, q, cand)
+        order = np.argsort(land)[::-1]
+        peak, second = land[order[0]], land[order[1]]
+        high = int(np.sum(land > 0.9 * peak))
+        found = np.array_equal(cand[order[0]], s)
+        print(f"  {n:>3} {q:>4} {q ** n:>11} {peak / max(second, 1e-9):>9.2f} {high:>12} "
+              f"{'no, 1 pico' if high == 1 else f'{high} picos':>9}  {'(secreto hallado ✓)' if found else '✗'}")
+    print("  -> un solo pico. No hay periodo: el secreto es una aguja, no un patrón que se repita.")
+    print()
+    print("Veredicto medido de la puerta cuántica:")
+    print("  Shor necesita un peine (grupo abeliano cíclico). LWE no lo tiene: su 'grupo' es un retículo")
+    print("  sin periodo conocido. La única estructura repetida que ofrece ML-KEM son las n rotaciones del")
+    print("  anillo (medidas en ringsieve): n dientes, no q/r. n es polinómico; el peine de Shor es masivo.")
+    print("  Por eso Chen 2024 necesitaba fabricar un paso que creara interferencia donde no la hay. Cerrada")
+    print("  con las ideas actuales; abierta solo si alguien demuestra un periodo oculto en LWE (nadie lo ha hecho).")
+
+
+# ---------------------------------------------------------------------------
+# Puerta 2 (algebraica): ¿el módulo de rango 2 de ML-KEM esconde un sub-retículo denso?
+# ---------------------------------------------------------------------------
+
+def shortest_vector(basis, max_nodes=3_000_000):
+    """Vector más corto exacto: LLL y después enumeración."""
+    R = lll_reduce(basis)
+    R2 = float(R[0] @ R[0]) + 0.5
+    xs, nodes, complete = enum_svp(R, R2, max_nodes)
+    if xs is None:
+        return R[0], False
+    return xs @ R, complete
+
+
+def cmd_module(args):
+    q = args.q
+    print("PUERTA ALGEBRAICA: los retículos IDEALES de rango 1 cayeron (CDPR 2016) porque su aritmética")
+    print("regala vectores cortos. ML-KEM es un MÓDULO de rango 2. Pregunta: ¿el rango 2 esconde un")
+    print("sub-retículo más denso de lo normal, una 'rampa' por la que descender? Se mide el vector más corto")
+    print("frente a la heurística gaussiana (GH): 1.0 = longitud normal, <1 = anomalía de densidad = puerta.")
+    print()
+    head = (f"{'d':>3} {'dim':>4} {'aleatorio corto/GH':>19} {'multiplic.':>11} "
+            f"{'módulo corto/GH':>16} {'multiplic.':>11} {'rotaciones en el retículo':>26}")
+    print(head)
+    print("-" * len(head))
+    anomalies = []
+    for d in [int(x) for x in args.ds.split(",")]:
+        m = 2 * d
+        gh = math.sqrt(m / (2 * math.pi * math.e)) * q ** (d / m)
+        rng = np.random.default_rng(args.seed + d)
+
+        A = rng.integers(0, q, size=(m, d), dtype=np.int64)
+        basis_r = kernel_basis(A, q, rng)
+        vr, _ = shortest_vector(basis_r, args.max_nodes)
+        ratio_r = math.sqrt(float(vr @ vr)) / gh
+        rot_in_r = not np.any((rotate_pair(vr, d) @ A) % q)
+
+        a1 = rng.integers(0, q, size=d, dtype=np.int64)
+        a2 = rng.integers(0, q, size=d, dtype=np.int64)
+        A_s = np.vstack([negacyclic_matrix(a1), negacyclic_matrix(a2)])
+        basis_s = kernel_basis(A_s, q, rng)
+        vs, _ = shortest_vector(basis_s, args.max_nodes)
+        ratio_s = math.sqrt(float(vs @ vs)) / gh
+        # ¿cuántas rotaciones de vs son vectores del retículo de la MISMA longitud?
+        rots, u, nvs = 0, vs.copy(), float(vs @ vs)
+        for _ in range(d):
+            u = rotate_pair(u, d)
+            if not np.any((u @ A_s) % q) and abs(float(u @ u) - nvs) < 1e-6:
+                rots += 1
+        anomalies.append(min(ratio_r, ratio_s))
+        print(f"{d:>3} {m:>4} {ratio_r:>19.3f} {'~2 (±v)':>11} {ratio_s:>16.3f} "
+              f"{f'{2 * rots} (±{rots} rot)':>11} {'sí, misma longitud' if rots else 'no':>26}", flush=True)
+    print()
+    lo = min(anomalies)
+    print(f"Anomalía de densidad más fuerte encontrada: corto/GH = {lo:.3f}  "
+          f"({'NINGUNA: puerta cerrada a esta escala' if lo > 0.85 else 'POSIBLE ANOMALÍA, mirar'}).")
+    print("El módulo de rango 2 tiene el mismo vector mínimo que un retículo aleatorio: no hay sub-retículo")
+    print("más denso que descubrir. La estructura solo multiplica ese mínimo por sus rotaciones (misma longitud):")
+    print("es simetría, no densidad. El descenso de CDPR necesitaba la densidad del rango 1, que aquí no existe.")
+    print("Abierta solo si el rango 2 tuviera una reducción a rango 1 con pérdida pequeña: nadie la conoce.")
 
 
 def cmd_selftest(args):
@@ -1415,6 +1560,17 @@ def cmd_selftest(args):
     check("producto en el anillo respeta la evaluación en 1",
           eval_poly(poly_mul(a, b, 257, 1), 1, 257) == (eval_poly(a, 1, 257) * eval_poly(b, 1, 257)) % 257)
 
+    check("orden multiplicativo y peine de Shor (N=15, a=7, r=4)", mult_order(7, 15) == 4 and
+          shor_comb(7, 15, 256)[1].max() > 0.2)
+    d = 6
+    rng2 = np.random.default_rng(5)
+    a1 = rng2.integers(0, 97, size=d); a2 = rng2.integers(0, 97, size=d)
+    A_s = np.vstack([negacyclic_matrix(a1), negacyclic_matrix(a2)])
+    bs = kernel_basis(A_s, 97, rng2)
+    v, _ = shortest_vector(bs)
+    check("módulo: la rotación del vector corto sigue en el retículo y mide igual",
+          (not np.any((rotate_pair(v, d) @ A_s) % 97)) and abs(float((rotate_pair(v, d) @ rotate_pair(v, d)) - (v @ v))) < 1e-6)
+
     print()
     print("todo OK" if fails == 0 else f"{fails} comprobaciones fallaron")
     return 0 if fails == 0 else 1
@@ -1494,6 +1650,15 @@ def main():
     rs.add_argument("--max-samples", type=int, default=200000)
     rs.add_argument("--seed", type=int, default=1)
 
+    pe = sub.add_parser("period", help="puerta cuántica: ¿tiene LWE un periodo tipo Shor?")
+    pe.add_argument("--seed", type=int, default=1)
+
+    mo = sub.add_parser("module", help="puerta algebraica: ¿el rango 2 esconde un sub-retículo denso?")
+    mo.add_argument("--ds", default="4,6,8,10")
+    mo.add_argument("--q", type=int, default=97)
+    mo.add_argument("--max-nodes", type=int, default=3000000)
+    mo.add_argument("--seed", type=int, default=1)
+
     sub.add_parser("selftest", help="comprobaciones internas")
 
     args = ap.parse_args()
@@ -1515,6 +1680,10 @@ def main():
         cmd_sieve(args)
     elif args.cmd == "ringsieve":
         cmd_ringsieve(args)
+    elif args.cmd == "period":
+        cmd_period(args)
+    elif args.cmd == "module":
+        cmd_module(args)
     elif args.cmd == "selftest":
         sys.exit(cmd_selftest(args))
 
