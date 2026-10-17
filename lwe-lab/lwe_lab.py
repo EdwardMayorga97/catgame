@@ -23,6 +23,8 @@ Uso:
   python3 lwe_lab.py wave                      # ondas + pliegues + FFT (ataque dual) y su muro
   python3 lwe_lab.py euclid                    # 1 incógnita y un primo de Mersenne de 2203 bits: cae
   python3 lwe_lab.py ring                      # anillo de polinomios: la puerta r=1 y cómo se cerró
+  python3 lwe_lab.py amplify                   # la raíz: eliminar incógnitas multiplica el error
+  python3 lwe_lab.py sieve                     # la criba: partículas que chocan; exponente medido
   python3 lwe_lab.py selftest                  # comprobaciones internas
 """
 
@@ -1103,6 +1105,141 @@ def cmd_ring(args):
     print("error es uniforme. La puerta existió, la encontró gente mirando simple, y se cerró eligiendo el anillo.")
 
 
+# ---------------------------------------------------------------------------
+# Experimento "amplify": la raíz del muro es que eliminar incógnitas multiplica el error
+# ---------------------------------------------------------------------------
+
+def cmd_amplify(args):
+    q, eta = args.q, args.eta
+    sigma = math.sqrt(eta / 2)
+    rng = np.random.default_rng(args.seed)
+    print(f"q={q}, eta={eta} (σ={sigma:.2f}). Umbral para leer un bit: |error final| < q/4 = {q / 4:.1f}")
+    print()
+    print("1. El dueño no elimina nada: conoce s, su multiplicador es 1, su error es e (σ) y lee el bit.")
+    print("2. El atacante tiene que ELIMINAR incógnitas combinando pistas, y el error se multiplica.")
+    print()
+    n = args.n
+    P = Params(n, q, n, eta)
+    while True:
+        s, (A, b), e = keygen(rng, P)
+        inv = inverse_mod_q(A, q)
+        if inv is not None:
+            break
+    s_hat = (inv @ b) % q
+    err = centered((s_hat - s) % q, q)
+    row = centered(inv, q).astype(float)
+    print(f"Eliminación gaussiana con n={n} pistas: multiplicadores = filas de A^-1 mod q.")
+    print(f"  tamaño típico de un multiplicador: {math.sqrt(float((row ** 2).mean())):.1f}  (uniforme: q/√12 = {q / math.sqrt(12):.1f})")
+    print(f"  error resultante por incógnita ≈ |fila|·σ = {math.sqrt(float((row ** 2).sum(axis=1).mean())) * sigma:.0f}  ≫ q/4")
+    print(f"  coordenadas de s correctas: {int(np.sum(err == 0))} de {n}. El error se volvió uniforme: la información murió.")
+    print()
+    print("Multiplicadores cortos (vectores del retículo dual) frente al umbral de lectura:")
+    head = f"{'n':>3} {'m':>4} {'|w| LLL':>8} {'|w| ideal':>9} {'|w|·σ':>7} {'umbral q/4':>10} {'lee directo':>11} {'señal/onda':>10}"
+    print(head)
+    print("-" * len(head))
+    for n in [int(x) for x in args.ns.split(",")]:
+        m = 2 * n
+        P = Params(n, q, m, eta)
+        s, (A, b), e = keygen(rng, P)
+        basis, perm = dual_basis(A, q, rng)
+        Rb = lll_reduce(basis)
+        w_lll = math.sqrt(float((Rb[0].astype(float) ** 2).sum()))
+        gh = math.sqrt(m / (2 * math.pi * math.e)) * q ** (n / m)
+        direct = "sí" if 3 * w_lll * sigma < q / 4 else "no"
+        print(f"{n:>3} {m:>4} {w_lll:>8.1f} {gh:>9.1f} {w_lll * sigma:>7.1f} {q / 4:>10.1f} {direct:>11} "
+              f"{wave_signal(sigma ** 2, w_lll ** 2, q):>10.2f}")
+    print()
+    print("Mismo cálculo para ML-KEM-512 (n=512, m=1024, q=3329, σ=√1.5), sin ejecutarlo:")
+    n, m, qk, sg = 512, 1024, 3329, math.sqrt(1.5)
+    gh = math.sqrt(m / (2 * math.pi * math.e)) * qk ** (n / m)
+    delta400 = ((400 / (2 * math.pi * math.e)) * (math.pi * 400) ** (1 / 400)) ** (1 / (2 * 399))
+    w400 = delta400 ** m * qk ** (n / m)
+    eps400 = wave_signal(sg ** 2, w400 ** 2, qk)
+    print(f"  multiplicador ideal (vector más corto del dual): |w| ≈ {gh:.0f}; señal por onda {wave_signal(sg ** 2, gh ** 2, qk):.2f}: leería s con un puñado de ondas")
+    print(f"  multiplicador que da BKZ-400 (2^117 operaciones): |w| ≈ {w400:.0f} ≈ {w400 / qk:.2f}·q; señal por onda 2^{math.log2(eps400):.0f}; ondas necesarias ≈ 2^{math.log2(8 / eps400 ** 2):.0f}")
+    print(f"  cuántos multiplicadores existen de longitud ≤ 2·ideal: ≈ 2^{m * math.log2(2):.0f};  ≤ 5·ideal: ≈ 2^{m * math.log2(5):.0f}")
+    print(f"  de cuántos vectores enteros hay que distinguirlos (bola de radio 5·ideal): ≈ 2^{m * math.log2(5 * gh * math.sqrt(2 * math.pi * math.e / m)):.0f}")
+    print()
+    print("Las llaves existen, por trillones de trillones. Nadie sabe encontrar una sin recorrer la bola.")
+
+
+# ---------------------------------------------------------------------------
+# Experimento "sieve": el algoritmo de la naturaleza (partículas que chocan y se acortan)
+# ---------------------------------------------------------------------------
+
+def gauss_sieve(B, rng, max_samples=200000):
+    """Criba de Gauss (simplificada): cada vector nuevo choca con la lista; si al sumar o restar
+    se acorta, se acorta. Se acaba cuando los choques ya solo producen ceros."""
+    R = lll_reduce(B)
+    m = R.shape[0]
+    L = np.zeros((0, m), dtype=np.int64)
+    norms = np.zeros(0)
+    collisions = samples = 0
+    while samples < max_samples:
+        v = rng.integers(-1, 2, size=m) @ R
+        if not v.any():
+            continue
+        samples += 1
+        while len(L):
+            dots = L @ v
+            mask = 2 * np.abs(dots) > norms
+            if not mask.any():
+                break
+            i = np.argmax(np.where(mask, np.abs(dots) - norms / 2, -1))
+            v = v - int(np.sign(dots[i])) * L[i]
+            if not v.any():
+                break
+        if not v.any():
+            collisions += 1
+            if collisions > 30 + len(L) // 4:
+                break
+            continue
+        vn = float(v @ v)
+        if len(L):
+            dots = L @ v
+            mask = 2 * np.abs(dots) > vn
+            if mask.any():
+                L[mask] = L[mask] - np.sign(dots[mask])[:, None].astype(np.int64) * v
+                norms = (L.astype(float) ** 2).sum(axis=1)
+                keep = norms > 0
+                L, norms = L[keep], norms[keep]
+        L = np.vstack([L, v])
+        norms = np.append(norms, vn)
+    return math.sqrt(float(norms.min())), len(L), samples
+
+
+def cmd_sieve(args):
+    q = args.q
+    rng = np.random.default_rng(args.seed)
+    print("Criba: se lanzan vectores del retículo; cuando dos chocan a menos de 60°, su suma o resta es más corta.")
+    print("Es el motor de los mejores ataques (BKZ con cribado). Mide cuántas partículas hacen falta según la dimensión.")
+    print()
+    head = f"{'dim':>4} {'más corto / ideal':>17} {'partículas':>10} {'lanzadas':>9} {'tiempo':>8}"
+    print(head)
+    print("-" * len(head))
+    dims, sizes = [], []
+    for m in [int(x) for x in args.dims.split(",")]:
+        n = m // 2
+        A = rng.integers(0, q, size=(m, n), dtype=np.int64)
+        basis, _ = dual_basis(A, q, rng)
+        gh = math.sqrt(m / (2 * math.pi * math.e)) * q ** (n / m)
+        t0 = time.perf_counter()
+        shortest, size, samples = gauss_sieve(basis, rng, max_samples=args.max_samples)
+        dt = time.perf_counter() - t0
+        dims.append(m)
+        sizes.append(size)
+        print(f"{m:>4} {shortest / gh:>17.2f} {size:>10} {samples:>9} {fmt_time(dt):>8}", flush=True)
+    if len(dims) >= 3:
+        slope = np.polyfit(dims, np.log2(sizes), 1)[0]
+        print()
+        print(f"Ajuste: partículas ≈ 2^({slope:.3f}·dim). Teoría del choque a 60°: (4/3)^(dim/2) = 2^(0.2075·dim).")
+    print()
+    print("Por qué 60°: dos vectores de longitud parecida se acortan al combinarse solo si forman menos de 60°.")
+    print("En dimensión alta casi todos los pares son casi perpendiculares: la fracción útil es (√3/2)^dim.")
+    print("Hace falta una lista de (4/3)^(dim/2) partículas para que los choques útiles sean frecuentes.")
+    print("Ese exponente no es criptografía: es geometría de esferas en dimensión alta (concentración de la medida).")
+
+
 def cmd_selftest(args):
     rng = np.random.default_rng(7)
     fails = 0
@@ -1241,6 +1378,19 @@ def main():
     rg.add_argument("--show-roots", type=int, default=3)
     rg.add_argument("--seed", type=int, default=1)
 
+    am = sub.add_parser("amplify", help="la raíz: eliminar incógnitas multiplica el error")
+    am.add_argument("--n", type=int, default=8)
+    am.add_argument("--ns", default="4,8,16,24,32,40")
+    am.add_argument("--q", type=int, default=97)
+    am.add_argument("--eta", type=int, default=2)
+    am.add_argument("--seed", type=int, default=1)
+
+    sv = sub.add_parser("sieve", help="criba: partículas que chocan; mide el exponente de la naturaleza")
+    sv.add_argument("--dims", default="12,16,20,24,28,32,36,40")
+    sv.add_argument("--q", type=int, default=97)
+    sv.add_argument("--max-samples", type=int, default=200000)
+    sv.add_argument("--seed", type=int, default=1)
+
     sub.add_parser("selftest", help="comprobaciones internas")
 
     args = ap.parse_args()
@@ -1256,6 +1406,10 @@ def main():
         cmd_euclid(args)
     elif args.cmd == "ring":
         cmd_ring(args)
+    elif args.cmd == "amplify":
+        cmd_amplify(args)
+    elif args.cmd == "sieve":
+        cmd_sieve(args)
     elif args.cmd == "selftest":
         sys.exit(cmd_selftest(args))
 
