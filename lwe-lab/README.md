@@ -10,6 +10,7 @@ python3 lwe_lab.py selftest     # comprobaciones internas (~10 s)
 python3 lwe_lab.py demo         # recorrido narrado con n=4, q=53 (~1 s)
 python3 lwe_lab.py scale        # crece n de 4 a 40 y mide cada ataque (~40 s)
 python3 lwe_lab.py leak         # qué pasa si se filtra parte del secreto (~15 s)
+python3 lwe_lab.py wave         # ondas + pliegues + FFT (ataque dual) y dónde se rompe (~7 s)
 ```
 
 ## Qué mirar
@@ -19,6 +20,7 @@ python3 lwe_lab.py leak         # qué pasa si se filtra parte del secreto (~15 
 | `demo` | Cómo se guarda el secreto `s`, qué se publica `(A, b)`, cómo se cifra un bit y por qué el error `e` es el candado. Después, cada ataque sobre la misma instancia y el atacante leyendo el mensaje. |
 | `scale` | Con `q=97` LLL rompe todo hasta `n=32` en segundos y falla en `n=40`; la enumeración exacta se queda sin presupuesto. Fuerza bruta y Arora-Ge quedan fuera mucho antes. La última columna estima el bloque BKZ que haría falta y su coste `2^(0.292·β)`. |
 | `leak` | En `n=40` el ataque falla; con 8 coordenadas de `s` filtradas, LLL vuelve a ganar. Cada coordenada conocida divide la fuerza bruta entre `q` y agranda la brecha del retículo. |
+| `wave` | El ataque dual: pliega `n-2` incógnitas con vectores duales cortos `w` y evalúa las `q²` opciones restantes de golpe con una FFT. La señal de cada onda es `exp(-2π²σ²|w|²/q²)`; el pico medido sigue a la fórmula y se hunde en cuanto LLL deja de encontrar pliegues cortos. |
 
 ## Ataques implementados
 
@@ -28,6 +30,7 @@ python3 lwe_lab.py leak         # qué pasa si se filtra parte del secreto (~15 
 3. **LLL** sobre el retículo de Kannan: el vector `(e, 1)` es mucho más corto que el resto y LLL lo encuentra mientras `n` es pequeño frente a `q`.
 4. **Enumeración exacta** (Schnorr-Euchner / Gama-Nguyen-Regev) tras LLL: siempre funciona con tiempo suficiente; el número de nodos crece exponencialmente. Es lo que BKZ hace por bloques.
 5. **Fuga**: conocer `k` coordenadas de `s` reduce el problema a `n-k`.
+6. **Ondas (ataque dual con FFT)**: vectores duales cortos pliegan el problema; una FFT prueba todas las opciones restantes a la vez. Muestra con una fórmula por qué el muro es el vector más corto.
 
 ## Parámetros útiles
 

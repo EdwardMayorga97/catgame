@@ -19,7 +19,8 @@ Uso:
   python3 lwe_lab.py demo                      # recorrido narrado con una instancia pequeña
   python3 lwe_lab.py scale                     # crece n y mide cada ataque
   python3 lwe_lab.py scale --q 3329 --ns 8,16,24,32
-  python3 lwe_lab.py leak --n 24 --k 12        # qué pasa si se filtra parte del secreto
+  python3 lwe_lab.py leak --n 40 --k 8         # qué pasa si se filtra parte del secreto
+  python3 lwe_lab.py wave                      # ondas + pliegues + FFT (ataque dual) y su muro
   python3 lwe_lab.py selftest                  # comprobaciones internas
 """
 
@@ -813,6 +814,123 @@ def cmd_leak(args):
     print("el vector (e,1) destaca más entre los demás y LLL/BKZ lo encuentra con menos esfuerzo.")
 
 
+# ---------------------------------------------------------------------------
+# Experimento "ondas": ataque dual con plegado y transformada de Fourier
+# ---------------------------------------------------------------------------
+
+def dual_basis(A_K, q, rng):
+    """Base del retículo de pliegues {w en Z^m : w·A_K = 0 (mod q)}. Tiene det q^k."""
+    m, k = A_K.shape
+    perm = np.arange(m)
+    inv = None
+    for _ in range(50):
+        inv = inverse_mod_q(A_K[perm[:k]].T, q)
+        if inv is not None:
+            break
+        rng.shuffle(perm)
+    if inv is None:
+        raise RuntimeError("A_K no tiene k filas independientes")
+    A2 = A_K[perm[k:]]                                  # (m-k) x k
+    C = (-(inv @ A2.T)) % q                             # k x (m-k): w1 = C·w2
+    basis = np.zeros((m, m), dtype=np.int64)
+    for j in range(m - k):
+        basis[j, :k] = C[:, j]
+        basis[j, k + j] = 1
+    for i in range(k):
+        basis[m - k + i, i] = q
+    return basis, perm
+
+
+def wave_signal(sigma2, w2, q):
+    """Fuerza de la onda plegada: E[cos(2π·w·e/q)] = exp(-2π²·σ²·|w|²/q²)."""
+    return math.exp(-2 * math.pi ** 2 * sigma2 * w2 / q ** 2)
+
+
+def attack_wave(A, b, q, eta, s_true, keep, rng, max_waves=4000):
+    """Pliega n-keep coordenadas con vectores duales cortos y busca el resto con una FFT.
+
+    Cada vector dual w convierte las m pistas en UNA pista plegada sobre keep incógnitas,
+    con error w·e. La FFT evalúa todas las q^keep opciones a la vez: la onda se refuerza
+    en el secreto verdadero y se cancela en los demás.
+    """
+    m, n = A.shape
+    k = n - keep
+    K = list(range(k))
+    Rr = list(range(k, n))
+    sigma2 = eta / 2
+    t0 = time.perf_counter()
+    if k == 0:
+        W = np.eye(m, dtype=np.int64)
+        lll_t = 0.0
+    else:
+        basis, perm = dual_basis(A[:, K], q, rng)
+        Rb = lll_reduce(basis)
+        lll_t = time.perf_counter() - t0
+        rows = [Rb[i] for i in range(m)]
+        extra = []
+        for i in range(m):
+            for j in range(i + 1, m):
+                extra.append(rows[i] + rows[j])
+                extra.append(rows[i] - rows[j])
+                if len(rows) + len(extra) >= max_waves:
+                    break
+            if len(rows) + len(extra) >= max_waves:
+                break
+        Wp = np.array(rows + extra, dtype=np.int64)
+        W = np.zeros_like(Wp)
+        W[:, perm] = Wp
+        assert not np.any((W @ A[:, K]) % q), "el pliegue no anula las coordenadas"
+    norms2 = (W.astype(np.float64) ** 2).sum(axis=1)
+    order = np.argsort(norms2)
+    W, norms2 = W[order], norms2[order]
+    # Filtro adaptado: cada onda pesa lo que su señal esperada. Las ondas largas no estorban.
+    eps = np.exp(-2 * math.pi ** 2 * sigma2 * norms2 / q ** 2)
+    a_fold = (W @ A[:, Rr]) % q                          # N x keep
+    b_fold = (W @ b) % q
+    F = np.zeros((q,) * keep, dtype=np.complex128)
+    np.add.at(F, tuple(a_fold.T), eps * np.exp(2j * np.pi * b_fold / q))
+    score = np.real(np.fft.fftn(F))
+    s_R = tuple(int(x) for x in s_true[Rr])
+    best = np.unravel_index(np.argmax(score), score.shape)
+    z = (score[s_R] - score.mean()) / score.std()
+    energy = float((eps ** 2).sum())                     # señal² acumulada
+    gh2 = (m / (2 * math.pi * math.e)) * q ** (2 * k / m) if k else 1.0
+    eps_gh = wave_signal(sigma2, gh2, q)
+    return {
+        "k": k, "keep": keep, "N": len(W), "w2_min": float(norms2[0]), "gh2": gh2,
+        "eps_min": float(eps[0]), "eps_gh": eps_gh,
+        "z_pred": math.sqrt(2 * energy), "z_ideal": math.sqrt(2 * len(W) * eps_gh ** 2),
+        "z": float(z), "ok": best == s_R, "fft_size": q ** keep,
+        "time": time.perf_counter() - t0, "lll_time": lll_t,
+    }
+
+
+def cmd_wave(args):
+    ns = [int(x) for x in args.ns.split(",")]
+    print(f"q={args.q}, eta={args.eta}, m={args.m_mult}·n, se dejan {args.keep} incógnitas para la FFT")
+    print("Onda plegada w: señal(w) = exp(-2π²·σ²·|w|²/q²). Con filtro adaptado, pico esperado z = sqrt(2·Σ señal(w)²).")
+    print("|w|² ideal = lo que daría un resolutor perfecto de SVP (heurística gaussiana); z ideal = el pico que vería con las mismas ondas.")
+    print()
+    head = (f"{'n':>3} {'m':>4} {'plegadas':>8} {'FFT':>7} {'|w|² LLL':>9} {'|w|² ideal':>10} "
+            f"{'señal LLL':>10} {'señal ideal':>11} {'ondas':>6} {'z pred':>7} {'z medido':>8} {'z ideal':>8} {'ok':>3} {'tiempo':>7}")
+    print(head)
+    print("-" * len(head))
+    for n in ns:
+        keep = min(args.keep, n)
+        P = Params(n, args.q, args.m_mult * n, args.eta)
+        rng = np.random.default_rng(args.seed + n)
+        s, (A, b), e = keygen(rng, P)
+        r = attack_wave(A, b, P.q, P.eta, s, keep, rng, max_waves=args.max_waves)
+        print(f"{n:>3} {P.m:>4} {r['k']:>8} {fmt_count(math.log10(r['fft_size'])):>7} {r['w2_min']:>9.0f} "
+              f"{r['gh2']:>10.0f} {r['eps_min']:>10.1e} {r['eps_gh']:>11.2f} {r['N']:>6} {r['z_pred']:>7.1f} "
+              f"{r['z']:>8.1f} {r['z_ideal']:>8.1f} {'✓' if r['ok'] else '✗':>3} {fmt_time(r['time']):>7}", flush=True)
+    print()
+    print("Lectura: 'z medido' sigue a 'z pred': la fórmula de la onda es correcta. El pico se hunde porque")
+    print("LLL deja de encontrar pliegues cortos (|w|² LLL se aleja de |w|² ideal) y la señal cae como exp(-|w|²).")
+    print("Con los mismos 4000 pliegues pero de longitud ideal, el pico seguiría siendo enorme ('z ideal').")
+    print("Encontrar esos pliegues ideales ES el problema del vector más corto: BKZ, coste 2^(0,292·β).")
+
+
 def cmd_selftest(args):
     rng = np.random.default_rng(7)
     fails = 0
@@ -914,6 +1032,15 @@ def main():
     lk.add_argument("--seed", type=int, default=1)
     lk.add_argument("--max-nodes", type=int, default=2_000_000)
 
+    wv = sub.add_parser("wave", help="ondas + pliegues + FFT: el ataque dual, y dónde se rompe")
+    wv.add_argument("--ns", default="3,8,12,16,24,32,40")
+    wv.add_argument("--keep", type=int, default=2, help="incógnitas que quedan para la FFT (<= 3)")
+    wv.add_argument("--q", type=int, default=97)
+    wv.add_argument("--eta", type=int, default=2)
+    wv.add_argument("--m-mult", type=int, default=2)
+    wv.add_argument("--seed", type=int, default=1)
+    wv.add_argument("--max-waves", type=int, default=4000)
+
     sub.add_parser("selftest", help="comprobaciones internas")
 
     args = ap.parse_args()
@@ -923,6 +1050,8 @@ def main():
         cmd_scale(args)
     elif args.cmd == "leak":
         cmd_leak(args)
+    elif args.cmd == "wave":
+        cmd_wave(args)
     elif args.cmd == "selftest":
         sys.exit(cmd_selftest(args))
 
