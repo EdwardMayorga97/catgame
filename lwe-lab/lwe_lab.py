@@ -21,6 +21,8 @@ Uso:
   python3 lwe_lab.py scale --q 3329 --ns 8,16,24,32
   python3 lwe_lab.py leak --n 40 --k 8         # qué pasa si se filtra parte del secreto
   python3 lwe_lab.py wave                      # ondas + pliegues + FFT (ataque dual) y su muro
+  python3 lwe_lab.py euclid                    # 1 incógnita y un primo de Mersenne de 2203 bits: cae
+  python3 lwe_lab.py ring                      # anillo de polinomios: la puerta r=1 y cómo se cerró
   python3 lwe_lab.py selftest                  # comprobaciones internas
 """
 
@@ -184,10 +186,11 @@ class Params:
 
 def sample_error(rng, size, eta):
     """Binomial centrada: suma de eta pares (bit - bit). Rango [-eta, eta], varianza eta/2."""
+    shape = (size,) if isinstance(size, int) else tuple(size)
     if eta == 0:
-        return np.zeros(size, dtype=np.int64)
-    a = rng.integers(0, 2, size=(eta, size))
-    b = rng.integers(0, 2, size=(eta, size))
+        return np.zeros(shape, dtype=np.int64)
+    a = rng.integers(0, 2, size=(eta,) + shape)
+    b = rng.integers(0, 2, size=(eta,) + shape)
     return (a - b).sum(axis=0).astype(np.int64)
 
 
@@ -931,6 +934,175 @@ def cmd_wave(args):
     print("Encontrar esos pliegues ideales ES el problema del vector más corto: BKZ, coste 2^(0,292·β).")
 
 
+# ---------------------------------------------------------------------------
+# Experimento "euclid": una sola incógnita y un módulo de miles de bits
+# ---------------------------------------------------------------------------
+
+MERSENNE_EXPONENTS = (521, 607, 1279, 2203, 2281, 3217, 4253, 4423)
+
+
+def gauss_reduce_2d(b1, b2):
+    """Reducción de Lagrange-Gauss exacta en dimensión 2: el Euclides de los retículos."""
+    def dot(u, v):
+        return u[0] * v[0] + u[1] * v[1]
+    while True:
+        if dot(b1, b1) > dot(b2, b2):
+            b1, b2 = b2, b1
+        num, den = dot(b1, b2), dot(b1, b1)
+        mu = (2 * num + den) // (2 * den)       # entero más cercano, exacto
+        if mu == 0:
+            return b1, b2
+        b2 = (b2[0] - mu * b1[0], b2[1] - mu * b1[1])
+
+
+def round_frac(num, den):
+    if den < 0:
+        num, den = -num, -den
+    return (2 * num + den) // (2 * den)
+
+
+def attack_hnp_2d(a1, b1, a2, b2, q, bound):
+    """n=1 con dos pistas: b_i = a_i·s + e_i (mod q), |e_i| <= bound.
+
+    Se elimina s entre las dos pistas y queda: e_2 - c·e_1 = t (mod q). Los pares (e_1, e_2)
+    válidos forman un retículo de dimensión 2; Gauss lo reduce exactamente y el punto más
+    cercano al objetivo da los errores. Funciona con enteros de miles de bits.
+    """
+    inv = pow(a1, -1, q)
+    c = (a2 * inv) % q
+    t = (b2 - c * b1) % q
+    v1, v2 = gauss_reduce_2d((1, c), (0, q))
+    T = (0, -t)
+    det = v1[0] * v2[1] - v1[1] * v2[0]
+    alpha = round_frac(T[0] * v2[1] - T[1] * v2[0], det)
+    beta = round_frac(v1[0] * T[1] - v1[1] * T[0], det)
+    v = (alpha * v1[0] + beta * v2[0], alpha * v1[1] + beta * v2[1])
+    x, y = v[0], v[1] + t
+    if abs(x) > bound or abs(y) > bound:
+        return None
+    s = ((b1 - x) * inv) % q
+    return s, x, y
+
+
+def cmd_euclid(args):
+    import random
+    p = args.mersenne
+    if p not in MERSENNE_EXPONENTS:
+        raise SystemExit(f"--mersenne debe ser uno de {MERSENNE_EXPONENTS}")
+    q = 2 ** p - 1
+    rnd = random.Random(args.seed)
+    print(f"Módulo: el primo de Mersenne 2^{p} - 1 ({p} bits, {len(str(q))} cifras).")
+    print("Una sola incógnita s, dos pistas b_i = a_i·s + e_i (mod q). El error puede tener cientos de bits.")
+    print()
+    print(f"{'bits del error':>15} {'bits de información por pista':>30} {'resultado':>12} {'tiempo':>9}")
+    for k in (p // 2 - 60, p // 2 - 20, p // 2 - 2, p // 2 + 10):
+        s = rnd.randrange(q)
+        a1, a2 = rnd.randrange(1, q), rnd.randrange(1, q)
+        e1, e2 = rnd.randrange(-(2 ** k), 2 ** k + 1), rnd.randrange(-(2 ** k), 2 ** k + 1)
+        b1, b2 = (a1 * s + e1) % q, (a2 * s + e2) % q
+        t0 = time.perf_counter()
+        res = attack_hnp_2d(a1, b1, a2, b2, q, 2 ** k)
+        dt = time.perf_counter() - t0
+        if res is None:
+            verdict = "✗ sin solución"
+        elif res[0] == s:
+            verdict = "✓ s exacto"
+        else:
+            verdict = "~ otra válida"
+        print(f"{k:>15} {p - k:>30} {verdict:>12} {fmt_time(dt):>9}")
+    print()
+    print("Dos pistas bastan mientras cada una aporte más de la mitad de los bits de s (error < q^(1/2)).")
+    print("Con 512 incógnitas y un módulo de 12 bits es inalcanzable; con 1 incógnita y un módulo de")
+    print(f"{p} bits cae en milisegundos. La dificultad es el número de incógnitas, no el tamaño de los números.")
+    print("Euclides resuelve exacto la dimensión 2. Para dimensión n no existe un Euclides exacto y")
+    print("rápido: LLL es su versión aproximada, y la pérdida δ^n es el muro (problema de Hermite, 1850).")
+
+
+# ---------------------------------------------------------------------------
+# Experimento "ring": el anillo de polinomios y la puerta que se cerró
+# ---------------------------------------------------------------------------
+
+def poly_mul(a, b, q, sign):
+    """Producto en Z_q[x]/(x^n - sign): sign=+1 es x^n - 1 (anillo malo), sign=-1 es x^n + 1 (ML-KEM)."""
+    n = len(a)
+    c = np.convolve(a, b)
+    lo, hi = c[:n].copy(), c[n:]
+    lo[:len(hi)] += sign * hi
+    return lo % q
+
+
+def ring_keygen(rng, n, q, eta, sign, samples):
+    s = sample_error(rng, n, eta)
+    out = []
+    for _ in range(samples):
+        a = rng.integers(0, q, size=n, dtype=np.int64)
+        e = sample_error(rng, n, eta)
+        out.append((a, (poly_mul(a, s, q, sign) + e) % q))
+    return s, out
+
+
+def eval_poly(p, r, q):
+    acc = 0
+    for coef in reversed(np.asarray(p).tolist()):
+        acc = (acc * r + int(coef)) % q
+    return acc
+
+
+def roots_mod_q(n, q, sign):
+    """Raíces de x^n - sign en Z_q (q pequeño: búsqueda directa)."""
+    return [r for r in range(q) if (pow(r, n, q) - sign) % q == 0]
+
+
+def attack_eval_root(samples, q, r, bound):
+    """Evaluar en una raíz r es un homomorfismo: b(r) = a(r)·s(r) + e(r) (mod q).
+
+    Si e(r) es pequeño, s(r) sale probando los q valores. Devuelve los candidatos que sobreviven.
+    """
+    cands = set(range(q))
+    for a, b in samples:
+        ar, br = eval_poly(a, r, q), eval_poly(b, r, q)
+        cands = {x for x in cands if abs(int(centered((br - ar * x) % q, q))) <= bound}
+    return cands
+
+
+def cmd_ring(args):
+    n, q, eta = args.n, args.q, args.eta
+    if not is_prime(q) or (q - 1) % (2 * n):
+        raise SystemExit("hace falta q primo con q ≡ 1 (mod 2n) para que x^n ± 1 tengan raíces")
+    rng = np.random.default_rng(args.seed)
+    bound = n * eta
+    print(f"Ring-LWE de juguete: n={n}, q={q}, eta={eta}, {args.samples} pistas. Cada pista es un polinomio.")
+    print(f"El error e tiene coeficientes en [-{eta}, {eta}], así que e(1) = suma de coeficientes está en [-{bound}, {bound}].")
+    trials = 20000
+    for sign, name in ((1, f"x^{n} - 1  (anillo MALO: 1 es raíz)"), (-1, f"x^{n} + 1  (anillo de ML-KEM)")):
+        print()
+        print(f"Anillo Z_q[x]/({name})")
+        s, samples = ring_keygen(rng, n, q, eta, sign, args.samples)
+        roots = roots_mod_q(n, q, sign)
+        print(f"  raíces de x^{n} {'-' if sign == 1 else '+'} 1 en Z_q: {len(roots)}  (ejemplos: {roots[:6]})")
+        for r in roots[:args.show_roots]:
+            E = sample_error(rng, (trials, n), eta)
+            powers = np.array([pow(r, j, q) for j in range(n)], dtype=np.int64)
+            er = centered((E @ powers) % q, q)
+            frac = float(np.mean(np.abs(er) <= bound))
+            cands = attack_eval_root(samples, q, r, bound)
+            true = eval_poly(s, r, q)
+            hit = true in cands
+            print(f"  raíz r={r:>4}: |e(r)| <= {bound} en {frac * 100:5.1f}% de los errores "
+                  f"(uniforme daría {(2 * bound + 1) / q * 100:4.1f}%) -> candidatos para s(r): {len(cands):>3}, "
+                  f"{'incluye el verdadero ✓' if hit else 'el verdadero se perdió ✗'}")
+        if sign == 1:
+            print(f"  => s(1) = suma de los coeficientes del secreto = {eval_poly(s, 1, q)} mod q: una ecuación lineal")
+            print("     sobre el secreto, gratis, mirando el problema 'como un niño': sustituye x por 1.")
+        else:
+            print("  => ninguna raíz conserva lo pequeño: e(r) se reparte uniforme y el filtro no distingue nada.")
+    print()
+    print("Esto es el ataque de Elias-Lauter-Ozman-Stange (2015) en su versión más simple: funciona cuando el")
+    print("anillo tiene una raíz r en la que los errores pequeños siguen siendo pequeños. ML-KEM usa x^256 + 1")
+    print("con q = 3329 ≡ 1 (mod 256): no tiene raíces en Z_q, se parte en 128 ranuras F_(q²) y en cada una el")
+    print("error es uniforme. La puerta existió, la encontró gente mirando simple, y se cerró eligiendo el anillo.")
+
+
 def cmd_selftest(args):
     rng = np.random.default_rng(7)
     fails = 0
@@ -993,6 +1165,22 @@ def cmd_selftest(args):
     r = attack_lattice(A, b, P.q, P.eta, rng, use_enum=True, max_nodes=2_000_000)
     check(f"ataque primal n=16 q=97 ({r['method']})", r["ok"] and np.array_equal(r["s"], s))
 
+    import random
+    q = 2 ** 521 - 1
+    rnd = random.Random(3)
+    s1 = rnd.randrange(q)
+    a1, a2 = rnd.randrange(1, q), rnd.randrange(1, q)
+    e1, e2 = rnd.randrange(-(2 ** 200), 2 ** 200), rnd.randrange(-(2 ** 200), 2 ** 200)
+    res = attack_hnp_2d(a1, (a1 * s1 + e1) % q, a2, (a2 * s1 + e2) % q, q, 2 ** 200)
+    check("Euclides 2D recupera s con módulo de 521 bits", res is not None and res[0] == s1)
+
+    s_r, samples = ring_keygen(rng, 16, 257, 2, 1, 6)
+    cands = attack_eval_root(samples, 257, 1, 32)
+    check("anillo x^n-1: evaluar en 1 recupera s(1)", cands == {eval_poly(s_r, 1, 257)})
+    a = rng.integers(0, 257, 16); b = rng.integers(0, 257, 16)
+    check("producto en el anillo respeta la evaluación en 1",
+          eval_poly(poly_mul(a, b, 257, 1), 1, 257) == (eval_poly(a, 1, 257) * eval_poly(b, 1, 257)) % 257)
+
     print()
     print("todo OK" if fails == 0 else f"{fails} comprobaciones fallaron")
     return 0 if fails == 0 else 1
@@ -1041,6 +1229,18 @@ def main():
     wv.add_argument("--seed", type=int, default=1)
     wv.add_argument("--max-waves", type=int, default=4000)
 
+    eu = sub.add_parser("euclid", help="1 incógnita, módulo de miles de bits: cae con Euclides")
+    eu.add_argument("--mersenne", type=int, default=2203, help=f"exponente p del primo 2^p-1: {MERSENNE_EXPONENTS}")
+    eu.add_argument("--seed", type=int, default=1)
+
+    rg = sub.add_parser("ring", help="anillo de polinomios: la puerta de la raíz r=1 y por qué ML-KEM la cierra")
+    rg.add_argument("--n", type=int, default=16)
+    rg.add_argument("--q", type=int, default=257)
+    rg.add_argument("--eta", type=int, default=2)
+    rg.add_argument("--samples", type=int, default=6)
+    rg.add_argument("--show-roots", type=int, default=3)
+    rg.add_argument("--seed", type=int, default=1)
+
     sub.add_parser("selftest", help="comprobaciones internas")
 
     args = ap.parse_args()
@@ -1052,6 +1252,10 @@ def main():
         cmd_leak(args)
     elif args.cmd == "wave":
         cmd_wave(args)
+    elif args.cmd == "euclid":
+        cmd_euclid(args)
+    elif args.cmd == "ring":
+        cmd_ring(args)
     elif args.cmd == "selftest":
         sys.exit(cmd_selftest(args))
 

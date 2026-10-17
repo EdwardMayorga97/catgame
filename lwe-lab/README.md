@@ -11,6 +11,8 @@ python3 lwe_lab.py demo         # recorrido narrado con n=4, q=53 (~1 s)
 python3 lwe_lab.py scale        # crece n de 4 a 40 y mide cada ataque (~40 s)
 python3 lwe_lab.py leak         # qué pasa si se filtra parte del secreto (~15 s)
 python3 lwe_lab.py wave         # ondas + pliegues + FFT (ataque dual) y dónde se rompe (~7 s)
+python3 lwe_lab.py euclid       # 1 incógnita, primo de Mersenne de 2203 bits: cae en ms
+python3 lwe_lab.py ring         # anillo de polinomios: la puerta r=1 y cómo la cierra ML-KEM
 ```
 
 ## Qué mirar
@@ -20,6 +22,8 @@ python3 lwe_lab.py wave         # ondas + pliegues + FFT (ataque dual) y dónde 
 | `demo` | Cómo se guarda el secreto `s`, qué se publica `(A, b)`, cómo se cifra un bit y por qué el error `e` es el candado. Después, cada ataque sobre la misma instancia y el atacante leyendo el mensaje. |
 | `scale` | Con `q=97` LLL rompe todo hasta `n=32` en segundos y falla en `n=40`; la enumeración exacta se queda sin presupuesto. Fuerza bruta y Arora-Ge quedan fuera mucho antes. La última columna estima el bloque BKZ que haría falta y su coste `2^(0.292·β)`. |
 | `leak` | En `n=40` el ataque falla; con 8 coordenadas de `s` filtradas, LLL vuelve a ganar. Cada coordenada conocida divide la fuerza bruta entre `q` y agranda la brecha del retículo. |
+| `euclid` | Una sola incógnita con el primo de Mersenne `2^2203 − 1` como módulo y errores de 1.000 bits: Euclides (reducción de Gauss en 2D) la rompe en 6 ms. La dificultad es el número de incógnitas, no el tamaño de los números. |
+| `ring` | Ring-LWE de juguete. En `x^n − 1`, sustituir `x = 1` conserva lo pequeño y regala una ecuación sobre el secreto (ataque de Elias–Lauter–Ozman–Stange, 2015). En `x^n + 1`, el anillo de ML-KEM, ninguna raíz lo conserva. |
 | `wave` | El ataque dual: pliega `n-2` incógnitas con vectores duales cortos `w` y evalúa las `q²` opciones restantes de golpe con una FFT. La señal de cada onda es `exp(-2π²σ²|w|²/q²)`; el pico medido sigue a la fórmula y se hunde en cuanto LLL deja de encontrar pliegues cortos. |
 
 ## Ataques implementados
