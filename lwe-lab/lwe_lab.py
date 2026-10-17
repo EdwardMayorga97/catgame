@@ -25,6 +25,7 @@ Uso:
   python3 lwe_lab.py ring                      # anillo de polinomios: la puerta r=1 y cómo se cerró
   python3 lwe_lab.py amplify                   # la raíz: eliminar incógnitas multiplica el error
   python3 lwe_lab.py sieve                     # la criba: partículas que chocan; exponente medido
+  python3 lwe_lab.py ringsieve                 # ¿la simetría del anillo (ML-KEM) cambia el exponente?
   python3 lwe_lab.py selftest                  # comprobaciones internas
 """
 
@@ -898,6 +899,10 @@ def attack_wave(A, b, q, eta, s_true, keep, rng, max_waves=4000):
     s_R = tuple(int(x) for x in s_true[Rr])
     best = np.unravel_index(np.argmax(score), score.shape)
     z = (score[s_R] - score.mean()) / score.std()
+    ghosts = score.copy()
+    ghosts[s_R] = score.mean()
+    z_ghost = (ghosts.max() - score.mean()) / score.std()   # el falso candidato más alto
+    z_ghost_pred = math.sqrt(2 * math.log(q ** keep))        # si los falsos fueran gaussianos independientes
     energy = float((eps ** 2).sum())                     # señal² acumulada
     gh2 = (m / (2 * math.pi * math.e)) * q ** (2 * k / m) if k else 1.0
     eps_gh = wave_signal(sigma2, gh2, q)
@@ -906,6 +911,7 @@ def attack_wave(A, b, q, eta, s_true, keep, rng, max_waves=4000):
         "eps_min": float(eps[0]), "eps_gh": eps_gh,
         "z_pred": math.sqrt(2 * energy), "z_ideal": math.sqrt(2 * len(W) * eps_gh ** 2),
         "z": float(z), "ok": best == s_R, "fft_size": q ** keep,
+        "z_ghost": float(z_ghost), "z_ghost_pred": z_ghost_pred,
         "time": time.perf_counter() - t0, "lll_time": lll_t,
     }
 
@@ -917,7 +923,8 @@ def cmd_wave(args):
     print("|w|² ideal = lo que daría un resolutor perfecto de SVP (heurística gaussiana); z ideal = el pico que vería con las mismas ondas.")
     print()
     head = (f"{'n':>3} {'m':>4} {'plegadas':>8} {'FFT':>7} {'|w|² LLL':>9} {'|w|² ideal':>10} "
-            f"{'señal LLL':>10} {'señal ideal':>11} {'ondas':>6} {'z pred':>7} {'z medido':>8} {'z ideal':>8} {'ok':>3} {'tiempo':>7}")
+            f"{'señal LLL':>10} {'señal ideal':>11} {'ondas':>6} {'z pred':>7} {'z medido':>8} {'z ideal':>8} "
+            f"{'fantasma':>8} {'(indep.)':>8} {'ok':>3} {'tiempo':>7}")
     print(head)
     print("-" * len(head))
     for n in ns:
@@ -928,8 +935,10 @@ def cmd_wave(args):
         r = attack_wave(A, b, P.q, P.eta, s, keep, rng, max_waves=args.max_waves)
         print(f"{n:>3} {P.m:>4} {r['k']:>8} {fmt_count(math.log10(r['fft_size'])):>7} {r['w2_min']:>9.0f} "
               f"{r['gh2']:>10.0f} {r['eps_min']:>10.1e} {r['eps_gh']:>11.2f} {r['N']:>6} {r['z_pred']:>7.1f} "
-              f"{r['z']:>8.1f} {r['z_ideal']:>8.1f} {'✓' if r['ok'] else '✗':>3} {fmt_time(r['time']):>7}", flush=True)
+              f"{r['z']:>8.1f} {r['z_ideal']:>8.1f} {r['z_ghost']:>8.1f} {r['z_ghost_pred']:>8.1f} "
+              f"{'✓' if r['ok'] else '✗':>3} {fmt_time(r['time']):>7}", flush=True)
     print()
+    print("'fantasma' = el falso candidato más alto; '(indep.)' = lo que valdría si las ondas fueran independientes.")
     print("Lectura: 'z medido' sigue a 'z pred': la fórmula de la onda es correcta. El pico se hunde porque")
     print("LLL deja de encontrar pliegues cortos (|w|² LLL se aleja de |w|² ideal) y la señal cae como exp(-|w|²).")
     print("Con los mismos 4000 pliegues pero de longitud ideal, el pico seguiría siendo enorme ('z ideal').")
@@ -1167,19 +1176,20 @@ def cmd_amplify(args):
 # Experimento "sieve": el algoritmo de la naturaleza (partículas que chocan y se acortan)
 # ---------------------------------------------------------------------------
 
-def gauss_sieve(B, rng, max_samples=200000):
+def gauss_sieve(B, rng, max_samples=200000, orbit=None):
     """Criba de Gauss (simplificada): cada vector nuevo choca con la lista; si al sumar o restar
-    se acorta, se acorta. Se acaba cuando los choques ya solo producen ceros."""
+    se acorta, se acorta. Se acaba cuando los choques ya solo producen ceros.
+
+    orbit(v) devuelve los vectores que la simetría del retículo regala con v (p. ej. sus rotaciones);
+    se insertan sin gastar lanzamientos nuevos.
+    """
     R = lll_reduce(B)
     m = R.shape[0]
     L = np.zeros((0, m), dtype=np.int64)
     norms = np.zeros(0)
     collisions = samples = 0
-    while samples < max_samples:
-        v = rng.integers(-1, 2, size=m) @ R
-        if not v.any():
-            continue
-        samples += 1
+
+    def reduce_against_list(v):
         while len(L):
             dots = L @ v
             mask = 2 * np.abs(dots) > norms
@@ -1189,11 +1199,10 @@ def gauss_sieve(B, rng, max_samples=200000):
             v = v - int(np.sign(dots[i])) * L[i]
             if not v.any():
                 break
-        if not v.any():
-            collisions += 1
-            if collisions > 30 + len(L) // 4:
-                break
-            continue
+        return v
+
+    def insert(v):
+        nonlocal L, norms
         vn = float(v @ v)
         if len(L):
             dots = L @ v
@@ -1205,7 +1214,95 @@ def gauss_sieve(B, rng, max_samples=200000):
                 L, norms = L[keep], norms[keep]
         L = np.vstack([L, v])
         norms = np.append(norms, vn)
+
+    while samples < max_samples:
+        v = rng.integers(-1, 2, size=m) @ R
+        if not v.any():
+            continue
+        samples += 1
+        v = reduce_against_list(v)
+        if not v.any():
+            collisions += 1
+            if collisions > 30 + len(L) // 4:
+                break
+            continue
+        insert(v)
+        if orbit is not None:
+            for u in orbit(v)[1:]:
+                u = reduce_against_list(u)
+                if u.any():
+                    insert(u)
     return math.sqrt(float(norms.min())), len(L), samples
+
+
+def negacyclic_matrix(a):
+    """Fila i = coeficientes de x^i · a en Z[x]/(x^n + 1). Así wᵀ·M = coeficientes de w(x)·a(x)."""
+    n = len(a)
+    M = np.zeros((n, n), dtype=np.int64)
+    cur = np.array(a, dtype=np.int64)
+    for i in range(n):
+        M[i] = cur
+        cur = np.concatenate(([-cur[-1]], cur[:-1]))
+    return M
+
+
+def rotate_pair(w, n):
+    """x · (w1, w2): rota cada mitad (desplazamiento negacíclico). Conserva la longitud."""
+    w1, w2 = w[:n], w[n:]
+    return np.concatenate(([-w1[-1]], w1[:-1], [-w2[-1]], w2[:-1]))
+
+
+def cmd_ringsieve(args):
+    q = args.q
+    rng = np.random.default_rng(args.seed)
+    print("Mismo retículo dual (dimensión 2n, determinante q^n) construido de dos formas:")
+    print("  aleatorio: A uniforme de 2n x n.   anillo: A = [M(a1); M(a2)], dos polinomios en Z_q[x]/(x^n+1).")
+    print("En el anillo, cada vector del retículo trae gratis sus n rotaciones x^k·w, todas de la misma longitud.")
+    print()
+    head = (f"{'dim':>4} {'aleatorio: corto/ideal':>22} {'partículas':>10} {'lanzadas':>8} {'tiempo':>7} "
+            f"{'anillo: corto/ideal':>19} {'partículas':>10} {'lanzadas':>8} {'tiempo':>7}")
+    print(head)
+    print("-" * len(head))
+    dims, size_r, size_s, draws_r, draws_s = [], [], [], [], []
+    for n in [int(x) for x in args.ns.split(",")]:
+        m = 2 * n
+        gh = math.sqrt(m / (2 * math.pi * math.e)) * q ** (n / m)
+        A = rng.integers(0, q, size=(m, n), dtype=np.int64)
+        basis, _ = dual_basis(A, q, rng)
+        t0 = time.perf_counter()
+        sh_r, sz_r, dr_r = gauss_sieve(basis, rng, max_samples=args.max_samples)
+        t_r = time.perf_counter() - t0
+
+        a1 = rng.integers(0, q, size=n, dtype=np.int64)
+        a2 = rng.integers(0, q, size=n, dtype=np.int64)
+        A_s = np.vstack([negacyclic_matrix(a1), negacyclic_matrix(a2)])
+        basis_s, _ = dual_basis(A_s, q, rng)
+        w0 = basis_s[0]
+        assert not np.any((rotate_pair(w0, n) @ A_s) % q), "la rotación se salió del retículo"
+
+        def orbit(v, n=n):
+            out = [v]
+            for _ in range(n - 1):
+                out.append(rotate_pair(out[-1], n))
+            return out
+        t0 = time.perf_counter()
+        sh_s, sz_s, dr_s = gauss_sieve(basis_s, rng, max_samples=args.max_samples, orbit=orbit)
+        t_s = time.perf_counter() - t0
+        dims.append(m); size_r.append(sz_r); size_s.append(sz_s); draws_r.append(dr_r); draws_s.append(dr_s)
+        print(f"{m:>4} {sh_r / gh:>22.2f} {sz_r:>10} {dr_r:>8} {fmt_time(t_r):>7} "
+              f"{sh_s / gh:>19.2f} {sz_s:>10} {dr_s:>8} {fmt_time(t_s):>7}", flush=True)
+    if len(dims) >= 3:
+        s_r = np.polyfit(dims, np.log2(size_r), 1)[0]
+        s_s = np.polyfit(dims, np.log2(size_s), 1)[0]
+        d_r = np.polyfit(dims, np.log2(draws_r), 1)[0]
+        d_s = np.polyfit(dims, np.log2(draws_s), 1)[0]
+        print()
+        print(f"Exponente de partículas: aleatorio 2^({s_r:.3f}·dim), anillo 2^({s_s:.3f}·dim)")
+        print(f"Exponente de lanzadas:   aleatorio 2^({d_r:.3f}·dim), anillo 2^({d_s:.3f}·dim)")
+        print(f"Lanzadas aleatorio/anillo en la última fila: {draws_r[-1] / max(draws_s[-1], 1):.1f}x  (n = {dims[-1] // 2})")
+    print()
+    print("Si la simetría solo regala rotaciones, ahorra un factor ~n en lanzadas y deja el exponente igual:")
+    print("la geometría del choque a 60° no distingue un retículo con simetría de uno sin ella.")
 
 
 def cmd_sieve(args):
@@ -1391,6 +1488,12 @@ def main():
     sv.add_argument("--max-samples", type=int, default=200000)
     sv.add_argument("--seed", type=int, default=1)
 
+    rs = sub.add_parser("ringsieve", help="¿la simetría del anillo cambia el exponente de la criba?")
+    rs.add_argument("--ns", default="6,8,10,12,14,16,18,20", help="n del anillo; la dimensión del retículo es 2n")
+    rs.add_argument("--q", type=int, default=97)
+    rs.add_argument("--max-samples", type=int, default=200000)
+    rs.add_argument("--seed", type=int, default=1)
+
     sub.add_parser("selftest", help="comprobaciones internas")
 
     args = ap.parse_args()
@@ -1410,6 +1513,8 @@ def main():
         cmd_amplify(args)
     elif args.cmd == "sieve":
         cmd_sieve(args)
+    elif args.cmd == "ringsieve":
+        cmd_ringsieve(args)
     elif args.cmd == "selftest":
         sys.exit(cmd_selftest(args))
 

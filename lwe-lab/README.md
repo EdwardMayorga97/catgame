@@ -15,6 +15,7 @@ python3 lwe_lab.py euclid       # 1 incógnita, primo de Mersenne de 2203 bits: 
 python3 lwe_lab.py ring         # anillo de polinomios: la puerta r=1 y cómo la cierra ML-KEM
 python3 lwe_lab.py amplify      # la raíz del muro: eliminar incógnitas multiplica el error (~6 s)
 python3 lwe_lab.py sieve        # la criba: partículas que chocan a 60°; exponente medido (~30 s)
+python3 lwe_lab.py ringsieve    # ¿la simetría del anillo de ML-KEM cambia el exponente? (~45 s)
 ```
 
 ## Qué mirar
@@ -28,7 +29,8 @@ python3 lwe_lab.py sieve        # la criba: partículas que chocan a 60°; expon
 | `ring` | Ring-LWE de juguete. En `x^n − 1`, sustituir `x = 1` conserva lo pequeño y regala una ecuación sobre el secreto (ataque de Elias–Lauter–Ozman–Stange, 2015). En `x^n + 1`, el anillo de ML-KEM, ninguna raíz lo conserva. |
 | `amplify` | El dueño multiplica por 1; el atacante tiene que eliminar incógnitas y multiplica el error por el tamaño de sus multiplicadores. Compara multiplicadores uniformes, LLL e ideales con el umbral `q/4`, y hace la cuenta para ML-KEM-512: existen `2^1024` multiplicadores buenos y nadie sabe encontrar uno. |
 | `sieve` | Criba de Gauss: vectores del retículo que chocan y se acortan. Mide cuántas partículas hacen falta por dimensión (≈ `2^(0.21·dim)` en teoría) y explica el exponente con la geometría del choque a 60°. |
-| `wave` | El ataque dual: pliega `n-2` incógnitas con vectores duales cortos `w` y evalúa las `q²` opciones restantes de golpe con una FFT. La señal de cada onda es `exp(-2π²σ²|w|²/q²)`; el pico medido sigue a la fórmula y se hunde en cuanto LLL deja de encontrar pliegues cortos. |
+| `ringsieve` | El mismo retículo dual construido aleatorio y con la estructura de anillo (cada vector regala sus n rotaciones). Mismo número de partículas al final (mismo exponente); la simetría solo ahorra lanzadas, un factor que crece como n. |
+| `wave` | El ataque dual: pliega `n-2` incógnitas con vectores duales cortos `w` y evalúa las `q²` opciones restantes de golpe con una FFT. La señal de cada onda es `exp(-2π²σ²|w|²/q²)`; el pico medido sigue a la fórmula y se hunde en cuanto LLL deja de encontrar pliegues cortos. La columna `fantasma` mide el falso candidato más alto: 7–11 frente a 4,3 si las ondas fueran independientes, el fallo que Ducas y Pulles señalaron en el ataque de MATZOV. |
 
 ## Ataques implementados
 
